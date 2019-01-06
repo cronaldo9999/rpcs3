@@ -1046,6 +1046,100 @@ void VKGSRender::check_descriptors()
 	}
 }
 
+void VKGSRender::check_window_status()
+{
+#ifdef _WIN32
+
+	if (LIKELY(!m_frame->has_wm_events()))
+	{
+		return;
+	}
+
+	while (const auto _event = m_frame->get_wm_event())
+	{
+		switch (_event)
+		{
+		case wm_event::renderer_pause:
+		{
+			renderer_unavailable = true;
+			break;
+		}
+		case wm_event::geometry_change_notice:
+		{
+			// Stall until finish notification is received. Also, raise surface dirty flag
+			u32 timeout = 1000;
+			bool handled = false;
+
+			while (timeout)
+			{
+				switch (m_frame->get_wm_event())
+				{
+				default:
+					break;
+				case wm_event::window_resized:
+					handled = true;
+					present_surface_dirty_flag = true;
+					break;
+				case wm_event::geometry_change_in_progress:
+					timeout += 10; // Extend timeout to wait for user to finish resizing
+					break;
+				case wm_event::window_restored:
+				case wm_event::window_visibility_changed:
+				case wm_event::window_minimized:
+				case wm_event::window_moved:
+					handled = true; // Ignore these events as they do not alter client area
+					break;
+				}
+
+				if (handled)
+				{
+					break;
+				}
+				else
+				{
+					// Wait for window manager event
+					std::this_thread::sleep_for(10ms);
+					timeout -= 10;
+				}
+			}
+
+			if (!timeout)
+			{
+				LOG_ERROR(RSX, "wm event handler timed out");
+			}
+
+			// Reset renderer availability if something has changed about the window
+			renderer_unavailable = false;
+			break;
+		}
+		case wm_event::window_resized:
+		{
+			LOG_ERROR(RSX, "wm_event::window_resized received without corresponding wm_event::geometry_change_notice!");
+			std::this_thread::sleep_for(100ms);
+			renderer_unavailable = false;
+			break;
+		}
+		}
+	}
+
+#else
+
+	const auto frame_width = m_frame->client_width();
+	const auto frame_height = m_frame->client_height();
+
+	if (m_client_height != frame_height ||
+		m_client_width != frame_width)
+	{
+		if (!!frame_width && !!frame_height)
+		{
+			present_surface_dirty_flag = true;
+			renderer_unavailable = false;
+		}
+	}
+
+#endif
+}
+
 VkDescriptorSet VKGSRender::allocate_descriptor_set()
 {
 	verify(HERE), m_current_frame->used_descriptors < DESCRIPTOR_MAX_DRAW_CALLS;
@@ -2347,84 +2441,7 @@ void VKGSRender::do_local_task(rsx::FIFO_state state)
 		return;
 	}
 
-#ifdef _WIN32
-
-	switch (m_frame->get_wm_event())
-	{
-	case wm_event::none:
-		break;
-	case wm_event::geometry_change_notice:
-	{
-		//Stall until finish notification is received. Also, raise surface dirty flag
-		u32 timeout = 1000;
-		bool handled = false;
-
-		while (timeout)
-		{
-			switch (m_frame->get_wm_event())
-			{
-			default:
-				break;
-			case wm_event::window_resized:
-				handled = true;
-				present_surface_dirty_flag = true;
-				break;
-			case wm_event::geometry_change_in_progress:
-				timeout += 10; //extend timeout to wait for user to finish resizing
-				break;
-			case wm_event::window_restored:
-			case wm_event::window_visibility_changed:
-			case wm_event::window_minimized:
-			case wm_event::window_moved:
-				handled = true; //ignore these events as they do not alter client area
-				break;
-			}
-
-			if (handled)
-				break;
-			else
-			{
-				//wait for window manager event
-				std::this_thread::sleep_for(10ms);
-				timeout -= 10;
-			}
-
-			//reset renderer availability if something has changed about the window
-			renderer_unavailable = false;
-		}
-
-		if (!timeout)
-		{
-			LOG_ERROR(RSX, "wm event handler timed out");
-		}
-
-		break;
-	}
-	case wm_event::window_resized:
-	{
-		LOG_ERROR(RSX, "wm_event::window_resized received without corresponding wm_event::geometry_change_notice!");
-		std::this_thread::sleep_for(100ms);
-		renderer_unavailable = false;
-		break;
-	}
-	}
-
-#else
-
-	const auto frame_width = m_frame->client_width();
-	const auto frame_height = m_frame->client_height();
-
-	if (m_client_height != frame_height ||
-		m_client_width != frame_width)
-	{
-		if (!!frame_width && !!frame_height)
-		{
-			present_surface_dirty_flag = true;
-			renderer_unavailable = false;
-		}
-	}
-
-#endif
+	check_window_status();
 
 	if (m_overlay_manager)
 	{

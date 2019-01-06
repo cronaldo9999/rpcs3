@@ -137,7 +137,7 @@ void gs_frame::keyPressEvent(QKeyEvent *keyEvent)
 			if (keyEvent->modifiers() == Qt::AltModifier) { OnFullScreen(); return; }
 			break;
 		case Qt::Key_Escape:
-			if (visibility() == FullScreen) { setVisibility(Windowed); return; }
+			if (visibility() == FullScreen) { OnFullScreen(); return; }
 			break;
 		case Qt::Key_P:
 			if (keyEvent->modifiers() == Qt::ControlModifier && Emu.IsRunning()) { Emu.Pause(); return; }
@@ -162,8 +162,13 @@ void gs_frame::keyPressEvent(QKeyEvent *keyEvent)
 
 void gs_frame::OnFullScreen()
 {
-	auto l_setFullScreenVis = [=]()
+	auto l_setFullScreenVis = [&]()
 	{
+		if (wm_event_queue_enabled.load(std::memory_order_consume) && !Emu.IsStopped())
+		{
+			push_wm_event(wm_event::renderer_pause);
+		}
+
 		if (visibility() == FullScreen)
 		{
 			setVisibility(Windowed);
@@ -356,9 +361,6 @@ bool gs_frame::nativeEvent(const QByteArray &eventType, void *message, long *res
 #ifdef _WIN32
 	if (wm_event_queue_enabled.load(std::memory_order_consume) && !Emu.IsStopped())
 	{
-		//Wait for consumer to clear notification pending flag
-		while (wm_event_raised.load(std::memory_order_consume) && !Emu.IsStopped());
-
 		{
 			MSG* msg;
 			if (m_use_5_11_1_workaround)
@@ -371,8 +373,6 @@ bool gs_frame::nativeEvent(const QByteArray &eventType, void *message, long *res
 				msg = reinterpret_cast<MSG*>(message);
 			}
 
-			std::lock_guard lock(wm_event_lock);
-
 			switch (msg->message)
 			{
 			case WM_WINDOWPOSCHANGING:
@@ -381,11 +381,10 @@ bool gs_frame::nativeEvent(const QByteArray &eventType, void *message, long *res
 				if (m_in_sizing_event || flags != 0)
 					break;
 
-				//About to resize
+				// About to resize
 				m_in_sizing_event = true;
 				m_interactive_resize = false;
-				m_raised_event = wm_event::geometry_change_notice;
-				wm_event_raised.store(true);
+				push_wm_event(wm_event::geometry_change_notice);
 				break;
 			}
 			case WM_WINDOWPOSCHANGED:
@@ -398,32 +397,29 @@ bool gs_frame::nativeEvent(const QByteArray &eventType, void *message, long *res
 
 				if (flags & SWP_NOSIZE)
 				{
-					m_raised_event = wm_event::window_moved;
+					push_wm_event(wm_event::window_moved);
 				}
 				else
 				{
 					LPWINDOWPOS wpos = reinterpret_cast<LPWINDOWPOS>(msg->lParam);
 					if (wpos->cx <= GetSystemMetrics(SM_CXMINIMIZED) || wpos->cy <= GetSystemMetrics(SM_CYMINIMIZED))
 					{
-						//Minimize event
+						// Minimize event
 						m_minimized = true;
-						m_raised_event = wm_event::window_minimized;
+						push_wm_event(wm_event::window_minimized);
 					}
 					else if (m_minimized)
 					{
 						m_minimized = false;
-						m_raised_event = wm_event::window_restored;
+						push_wm_event(wm_event::window_restored);
 					}
 					else
 					{
-						//Handle the resize in WM_SIZE message
+						// Handle the resize in WM_SIZE message
 						m_in_sizing_event = true;
-						break;
 					}
 				}
 
-				//Possibly finished resizing using maximize or SWP
-				wm_event_raised.store(true);
 				break;
 			}
 			case WM_ENTERSIZEMOVE:
@@ -433,37 +429,32 @@ bool gs_frame::nativeEvent(const QByteArray &eventType, void *message, long *res
 				m_user_interaction_active = false;
 				if (m_in_sizing_event && !m_user_interaction_active)
 				{
-					//Just finished resizing using manual interaction. The corresponding WM_SIZE is consumed before this event fires
-					m_raised_event = m_interactive_resize ? wm_event::window_resized : wm_event::window_moved;
+					// Just finished resizing using manual interaction. The corresponding WM_SIZE is consumed before this event fires
+					push_wm_event(m_interactive_resize ? wm_event::window_resized : wm_event::window_moved);
 					m_in_sizing_event = false;
-					wm_event_raised.store(true);
 				}
 				break;
 			case WM_SIZE:
 			{
 				if (m_user_interaction_active)
 				{
-					//Interaction is a resize not a move
+					// Interaction is a resize not a move
 					m_interactive_resize = true;
 				}
 				else if (m_in_sizing_event)
 				{
-					//Any other unexpected resize mode will give an unconsumed WM_SIZE event
-					m_raised_event = wm_event::window_resized;
+					// Any other unexpected resize mode will give an unconsumed WM_SIZE event
+					push_wm_event(wm_event::window_resized);
 					m_in_sizing_event = false;
-					wm_event_raised.store(true);
 				}
 				break;
 			}
 			}
 		}
-
-		//Do not enter DefWndProc until the consumer has consumed the message
-		while (wm_event_raised.load(std::memory_order_consume) && !Emu.IsStopped());
 	}
 #endif
 
-	//Let the default handler deal with this. Only the notification is required
+	// Let the default handler deal with this. Only the notification is required
 	return false;
 }
 

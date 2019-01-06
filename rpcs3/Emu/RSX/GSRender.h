@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "Emu/RSX/RSXThread.h"
 #include <memory>
@@ -35,13 +35,14 @@ struct RSXDebuggerProgram
 
 enum wm_event
 {
-	none, //nothing
-	geometry_change_notice, //about to start resizing and/or moving the window
-	geometry_change_in_progress, //window being resized and/or moved
-	window_resized, //window was resized
-	window_minimized, //window was minimized
-	window_restored, //window was restored from a minimized state
-	window_moved, //window moved without resize
+	none,                        // nothing
+	renderer_pause,              // user is requesting a temporary renderer pause
+	geometry_change_notice,      // about to start resizing and/or moving the window
+	geometry_change_in_progress, // window being resized and/or moved
+	window_resized,              // window was resized
+	window_minimized,            // window was minimized
+	window_restored,             // window was restored from a minimized state
+	window_moved,                // window moved without resize
 	window_visibility_changed
 };
 
@@ -85,34 +86,50 @@ public:
 
 protected:
 
-	//window manager event management
-	wm_event m_raised_event;
-	std::atomic_bool wm_event_raised = {};
+	// window manager event management
+	std::deque<wm_event> m_raised_events;
 	std::atomic_bool wm_event_queue_enabled = {};
 
 public:
-	//synchronize native window access
-	std::mutex wm_event_lock;
+	// synchronize native window access
+	shared_mutex wm_event_lock;
 
 	virtual wm_event get_default_wm_event() const = 0;
 
+	bool has_wm_events() const
+	{
+		return !m_raised_events.empty();
+	}
+
 	void clear_wm_events()
 	{
-		m_raised_event = wm_event::none;
-		wm_event_raised.store(false);
+		if (!m_raised_events.empty())
+		{
+			std::lock_guard lock(wm_event_lock);
+			m_raised_events.clear();
+		}
+	}
+
+	void push_wm_event(wm_event&& _event)
+	{
+		std::lock_guard lock(wm_event_lock);
+		m_raised_events.push_back(_event);
 	}
 
 	wm_event get_wm_event()
 	{
-		if (wm_event_raised.load(std::memory_order_consume))
+		if (m_raised_events.empty())
 		{
-			auto result = m_raised_event;
-			m_raised_event = wm_event::none;
-			wm_event_raised.store(false);
-			return result;
+			return wm_event::none;
 		}
+		else
+		{
+			std::lock_guard lock(wm_event_lock);
 
-		return get_default_wm_event();
+			const auto _event = m_raised_events.front();
+			m_raised_events.pop_front();
+			return _event;
+		}
 	}
 
 	void disable_wm_event_queue()

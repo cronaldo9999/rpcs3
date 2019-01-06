@@ -439,6 +439,8 @@ public:
 	void set_scissor();
 	void bind_viewport();
 
+	void check_window_status();
+
 	void sync_hint(rsx::FIFO_hint hint) override;
 
 	void begin_occlusion_query(rsx::reports::occlusion_query_info* query) override;

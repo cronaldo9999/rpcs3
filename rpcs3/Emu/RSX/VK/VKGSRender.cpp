@@ -918,7 +918,7 @@ bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 
 			if (target_cb)
 			{
-				target_cb->wait();
+				target_cb->wait(GENERAL_WAIT_TIMEOUT);
 			}
 		}
 
@@ -1059,9 +1059,12 @@ void VKGSRender::check_window_status()
 	{
 		switch (_event)
 		{
-		case wm_event::renderer_pause:
+		case wm_event::toggle_fullscreen:
 		{
 			renderer_unavailable = true;
+			m_frame->enable_wm_fullscreen();
+			m_frame->toggle_fullscreen();
+			m_frame->disable_wm_fullscreen();
 			break;
 		}
 		case wm_event::geometry_change_notice:
@@ -1098,8 +1101,8 @@ void VKGSRender::check_window_status()
 				else
 				{
 					// Wait for window manager event
-					std::this_thread::sleep_for(10ms);
-					timeout -= 10;
+					std::this_thread::sleep_for(1ms);
+					timeout --;
 				}
 			}
 
@@ -1962,6 +1965,7 @@ void VKGSRender::on_init_thread()
 		m_frame->disable_wm_event_queue();
 		m_shaders_cache->load(&helper, *m_device, pipeline_layout);
 		m_frame->enable_wm_event_queue();
+		m_frame->disable_wm_fullscreen();
 	}
 }
 
@@ -2336,8 +2340,14 @@ void VKGSRender::process_swap_request(frame_context_t *ctx, bool free_resources)
 
 	if (ctx->swap_command_buffer->pending)
 	{
-		//Perform hard swap here
-		ctx->swap_command_buffer->wait();
+		// Perform hard swap here
+		if (ctx->swap_command_buffer->wait(FRAME_PRESENT_TIMEOUT) != VK_SUCCESS)
+		{
+			// Lost surface, release renderer
+			present_surface_dirty_flag = true;
+			renderer_unavailable = true;
+		}
+
 		free_resources = true;
 	}
 
@@ -3089,8 +3099,8 @@ void VKGSRender::reinitialize_swapchain()
 		if (ctx.present_image == UINT32_MAX)
 			continue;
 
-		//Release present image by presenting it
-		ctx.swap_command_buffer->wait();
+		// Release present image by presenting it
+		ctx.swap_command_buffer->wait(FRAME_PRESENT_TIMEOUT);
 		ctx.swap_command_buffer = nullptr;
 		present(&ctx);
 	}
@@ -3595,7 +3605,7 @@ void VKGSRender::get_occlusion_query_result(rsx::reports::occlusion_query_info* 
 		}
 
 		if (data.command_buffer_to_wait->pending)
-			data.command_buffer_to_wait->wait();
+			data.command_buffer_to_wait->wait(GENERAL_WAIT_TIMEOUT);
 
 		//Gather data
 		for (const auto occlusion_id : data.indices)

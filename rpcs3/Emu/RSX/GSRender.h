@@ -36,7 +36,7 @@ struct RSXDebuggerProgram
 enum wm_event
 {
 	none,                        // nothing
-	renderer_pause,              // user is requesting a temporary renderer pause
+	toggle_fullscreen,           // user is requesting a fullscreen switch
 	geometry_change_notice,      // about to start resizing and/or moving the window
 	geometry_change_in_progress, // window being resized and/or moved
 	window_resized,              // window was resized
@@ -63,38 +63,43 @@ using draw_context_t = void*;
 	>;
 #endif
 
-class GSFrameBase
-{
-public:
-	GSFrameBase() = default;
-	GSFrameBase(const GSFrameBase&) = delete;
-	virtual ~GSFrameBase() {}
+	class GSFrameBase
+	{
+	public:
+		GSFrameBase() = default;
+		GSFrameBase(const GSFrameBase&) = delete;
+		virtual ~GSFrameBase() {}
 
-	virtual void close() = 0;
-	virtual bool shown() = 0;
-	virtual void hide() = 0;
-	virtual void show() = 0;
+		virtual void close() = 0;
+		virtual bool shown() = 0;
+		virtual void hide() = 0;
+		virtual void show() = 0;
+		virtual void toggle_fullscreen() = 0;
 
-	virtual void delete_context(draw_context_t ctx) = 0;
-	virtual draw_context_t make_context() = 0;
-	virtual void set_current(draw_context_t ctx) = 0;
-	virtual void flip(draw_context_t ctx, bool skip_frame=false) = 0;
-	virtual int client_width() = 0;
-	virtual int client_height() = 0;
+		virtual void delete_context(draw_context_t ctx) = 0;
+		virtual draw_context_t make_context() = 0;
+		virtual void set_current(draw_context_t ctx) = 0;
+		virtual void flip(draw_context_t ctx, bool skip_frame = false) = 0;
+		virtual int client_width() = 0;
+		virtual int client_height() = 0;
 
-	virtual display_handle_t handle() const = 0;
+		virtual display_handle_t handle() const = 0;
 
-protected:
+	protected:
 
-	// window manager event management
-	std::deque<wm_event> m_raised_events;
-	std::atomic_bool wm_event_queue_enabled = {};
+		// window manager event management
+		std::deque<wm_event> m_raised_events;
+		std::atomic_bool wm_event_queue_enabled = {};
+		std::atomic_bool wm_allow_fullscreen = { true };
 
 public:
 	// synchronize native window access
 	shared_mutex wm_event_lock;
 
-	virtual wm_event get_default_wm_event() const = 0;
+	void wm_wait() const
+	{
+		while (!m_raised_events.empty() && !Emu.IsStopped()) _mm_pause();
+	}
 
 	bool has_wm_events() const
 	{
@@ -141,6 +146,16 @@ public:
 	{
 		wm_event_queue_enabled.store(true);
 	}
+
+	void disable_wm_fullscreen()
+	{
+		wm_allow_fullscreen.store(false);
+	}
+
+	void enable_wm_fullscreen()
+	{
+		wm_allow_fullscreen.store(true);
+	}
 };
 
 class GSRender : public rsx::thread
@@ -158,4 +173,6 @@ public:
 	void on_exit() override;
 
 	void flip(int buffer) override;
+
+	GSFrameBase* get_frame() { return m_frame; };
 };

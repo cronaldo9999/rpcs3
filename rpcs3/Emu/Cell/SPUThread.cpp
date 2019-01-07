@@ -982,6 +982,8 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 			}
 
 			ch_stall_stat.set_value((1u << args.tag) | ch_stall_stat.get_value());
+
+			args.stalled = true;
 			return false;
 		}
 
@@ -997,7 +999,6 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 		{
 			spu_mfc_cmd transfer;
 			transfer.eal  = addr;
-			transfer.eah  = 0;
 			transfer.lsa  = args.lsa | (addr & 0xf);
 			transfer.tag  = args.tag;
 			transfer.cmd  = MFC(args.cmd & ~MFC_LIST_MASK);
@@ -1113,7 +1114,7 @@ void spu_thread::do_mfc(bool wait)
 
 		if (args.cmd & MFC_LIST_MASK)
 		{
-			if (!(ch_stall_mask & mask))
+			if (!args.stalled)
 			{
 				if (do_list_transfer(args))
 				{
@@ -1420,7 +1421,7 @@ bool spu_thread::process_mfc_cmd(spu_mfc_cmd args)
 	{
 		if (LIKELY(args.size <= 0x4000))
 		{
-			if (LIKELY(do_dma_check(args) && !(ch_stall_mask & 1u << args.tag)))
+			if (LIKELY(do_dma_check(args)))
 			{
 				if (LIKELY(do_list_transfer(args)))
 				{
@@ -1992,7 +1993,7 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 
 	case MFC_EAH:
 	{
-		ch_mfc_cmd.eah = value;
+		//ch_mfc_cmd.eah = value;
 		return true;
 	}
 
@@ -2028,6 +2029,15 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 		if (ch_stall_mask & tag_mask)
 		{
 			ch_stall_mask &= ~tag_mask;
+
+			for (u32 i = 0; i < mfc_size; i++)
+			{
+				if (mfc_queue[i].tag == value)
+				{
+					mfc_queue[i].stalled = false;
+				}
+			}
+
 			do_mfc(true);
 		}
 

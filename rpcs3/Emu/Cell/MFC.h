@@ -85,5 +85,6 @@ struct alignas(16) spu_mfc_cmd
 	u16 size;
 	u32 lsa;
 	u32 eal;
-	u32 eah;
+	//u32 eah;
+	bool stalled;
 };

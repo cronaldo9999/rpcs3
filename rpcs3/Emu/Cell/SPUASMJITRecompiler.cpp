@@ -2719,8 +2719,8 @@ void spu_recompiler::WRCH(spu_opcode_t op)
 	}
 	case MFC_EAH:
 	{
-		c->mov(*addr, SPU_OFF_32(gpr, op.rt, &v128::_u32, 3));
-		c->mov(SPU_OFF_32(ch_mfc_cmd, &spu_mfc_cmd::eah), *addr);
+		//c->mov(*addr, SPU_OFF_32(gpr, op.rt, &v128::_u32, 3));
+		//c->mov(SPU_OFF_32(ch_mfc_cmd, &spu_mfc_cmd::eah), *addr);
 		return;
 	}
 	case MFC_EAL:
@@ -2758,8 +2758,16 @@ void spu_recompiler::WRCH(spu_opcode_t op)
 	}
 	case MFC_WrListStallAck:
 	{
-		auto sub = [](spu_thread* _spu, spu_function_t _ret)
+		auto sub = [](spu_thread* _spu, spu_function_t _ret, u32 tag)
 		{
+			for (u32 i = 0; i < _spu->mfc_size; i++)
+			{
+				if (_spu->mfc_queue[i].tag == tag)
+				{
+					_spu->mfc_queue[i].stalled = false;
+				}
+			}
+
 			_spu->do_mfc(true);
 			_ret(*_spu, _spu->_ptr<u8>(0), nullptr);
 		};
@@ -2770,7 +2778,7 @@ void spu_recompiler::WRCH(spu_opcode_t op)
 		c->btr(SPU_OFF_32(ch_stall_mask), qw0->r32());
 		c->jnc(ret);
 		c->lea(*ls, x86::qword_ptr(ret));
-		c->jmp(imm_ptr<void(*)(spu_thread*, spu_function_t)>(sub));
+		c->jmp(imm_ptr<void(*)(spu_thread*, spu_function_t, u32)>(sub));
 		c->align(kAlignCode, 16);
 		c->bind(ret);
 		return;

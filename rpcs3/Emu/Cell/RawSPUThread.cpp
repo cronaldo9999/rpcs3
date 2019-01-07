@@ -106,7 +106,7 @@ bool spu_thread::write_reg(const u32 addr, const u32 value)
 
 	case MFC_EAH_offs:
 	{
-		g_tls_mfc[index].eah = value;
+		//g_tls_mfc[index].eah = value;
 		return true;
 	}
 

@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "Emu/System.h"
 #include "Emu/IdManager.h"
 #include "Emu/Cell/PPUModule.h"
@@ -837,7 +837,15 @@ error_code cellGameGetSizeKB(vm::ptr<s32> size)
 
 	if (!fs::is_dir(local_dir))
 	{
-		return CELL_GAME_ERROR_ACCESS_ERROR;
+		if (fs::g_tls_error == fs::error::noent)
+		{
+			*size = 0;
+			return CELL_OK;
+		}
+		else
+		{
+			return CELL_GAME_ERROR_ACCESS_ERROR;
+		}
 	}
 
 	*size = ::narrow<u32>(fs::get_dir_size(local_dir) / 1024);

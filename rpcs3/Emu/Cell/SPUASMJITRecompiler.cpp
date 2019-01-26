@@ -32,33 +32,8 @@ std::unique_ptr<spu_recompiler_base> spu_recompiler_base::make_asmjit_recompiler
 	return std::make_unique<spu_recompiler>();
 }
 
-spu_runtime::spu_runtime()
-{
-	m_cache_path = fxm::check_unlocked<ppu_module>()->cache;
-
-	if (g_cfg.core.spu_debug)
-	{
-		fs::file(m_cache_path + "spu.log", fs::rewrite);
-	}
-
-	LOG_SUCCESS(SPU, "SPU Recompiler Runtime (ASMJIT) initialized...");
-
-	// Initialize lookup table
-	for (auto& v : m_dispatcher)
-	{
-		v.raw() = &spu_recompiler_base::dispatch;
-	}
-
-	// Initialize "empty" block
-	m_map[std::vector<u32>()] = &spu_recompiler_base::dispatch;
-}
-
 spu_recompiler::spu_recompiler()
 {
-	if (!g_cfg.core.spu_shared_runtime)
-	{
-		m_spurt = std::make_shared<spu_runtime>();
-	}
 }
 
 void spu_recompiler::init()
@@ -68,6 +43,7 @@ void spu_recompiler::init()
 	{
 		m_cache = fxm::get<spu_cache>();
 		m_spurt = fxm::get_always<spu_runtime>();
+		m_asmrt = m_spurt->get_asmjit_rt();
 	}
 }
 
@@ -83,18 +59,21 @@ spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
 {
 	init();
 
-	// Don't lock without shared runtime
-	std::unique_lock lock(m_spurt->m_mutex, std::defer_lock);
-
-	if (g_cfg.core.spu_shared_runtime)
-	{
-		lock.lock();
-	}
+	std::unique_lock lock(m_spurt->m_mutex);
 
 	// Try to find existing function, register new one if necessary
 	const auto fn_info = m_spurt->m_map.emplace(std::move(func_rv), nullptr);
 
 	auto& fn_location = fn_info.first->second;
+
+	if (!fn_location && !fn_info.second)
+	{
+		// Wait if already in progress
+		while (!fn_location)
+		{
+			m_spurt->m_cond.wait(lock);
+		}
+	}
 
 	if (fn_location)
 	{
@@ -102,6 +81,8 @@ spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
 	}
 
 	auto& func = fn_info.first->first;
+
+	lock.unlock();
 
 	using namespace asmjit;
 
@@ -124,7 +105,7 @@ spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
 	}
 
 	CodeHolder code;
-	code.init(m_spurt->m_jitrt.getCodeInfo());
+	code.init(m_asmrt->getCodeInfo());
 	code._globalHints = asmjit::CodeEmitter::kHintOptimizedAlign;
 
 	X86Assembler compiler(&code);
@@ -861,13 +842,10 @@ spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
 	// Compile and get function address
 	spu_function_t fn;
 
-	if (m_spurt->m_jitrt.add(&fn, &code))
+	if (m_asmrt->add(&fn, &code))
 	{
 		LOG_FATAL(SPU, "Failed to build a function");
 	}
-
-	// Register function
-	fn_location = fn;
 
 	if (g_cfg.core.spu_debug)
 	{
@@ -885,6 +863,11 @@ spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
 		m_cache->add(func);
 	}
 
+	lock.lock();
+
+	// Register function (possibly temporarily)
+	fn_location = fn;
+
 	// Generate a dispatcher (übertrampoline)
 	std::vector<u32> addrv{func[0]};
 	const auto beg = m_spurt->m_map.lower_bound(addrv);
@@ -899,18 +882,10 @@ spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
 	else
 	{
 		CodeHolder code;
-		code.init(m_spurt->m_jitrt.getCodeInfo());
+		code.init(m_asmrt->getCodeInfo());
 
 		X86Assembler compiler(&code);
 		this->c = &compiler;
-
-		if (g_cfg.core.spu_debug)
-		{
-			// Set logger
-			code.setLogger(&logger);
-		}
-
-		compiler.comment("\n\nTrampoline:\n\n");
 
 		struct work
 		{
@@ -1110,13 +1085,16 @@ spu_function_t spu_recompiler::compile(std::vector<u32>&& func_rv)
 
 		spu_function_t tr;
 
-		if (m_spurt->m_jitrt.add(&tr, &code))
+		if (m_asmrt->add(&tr, &code))
 		{
 			LOG_FATAL(SPU, "Failed to build a trampoline");
 		}
 
 		m_spurt->m_dispatcher[func[0] / 4] = tr;
 	}
+
+	lock.unlock();
+	m_spurt->m_cond.notify_all();
 
 	return fn;
 }
@@ -1436,6 +1414,7 @@ void spu_recompiler::get_events()
 		c->mov(*qw0, imm_ptr(vm::g_reservations));
 		c->shr(qw1->r32(), 4);
 		c->mov(*qw0, x86::qword_ptr(*qw0, *qw1));
+		c->and_(qw0->r64(), (u64)(~1ull));
 		c->cmp(*qw0, SPU_OFF_64(rtime));
 		c->jne(fail);
 		c->mov(*qw0, imm_ptr(vm::g_base_addr));
@@ -2596,7 +2575,7 @@ static void spu_wrch(spu_thread* _spu, u32 ch, u32 value, spu_function_t _ret)
 
 static void spu_wrch_mfc(spu_thread* _spu, spu_function_t _ret)
 {
-	if (!_spu->process_mfc_cmd(_spu->ch_mfc_cmd))
+	if (!_spu->process_mfc_cmd())
 	{
 		_ret = &spu_wrch_ret;
 	}
@@ -2758,8 +2737,17 @@ void spu_recompiler::WRCH(spu_opcode_t op)
 	}
 	case MFC_WrListStallAck:
 	{
-		auto sub = [](spu_thread* _spu, spu_function_t _ret)
+		auto sub = [](spu_thread* _spu, spu_function_t _ret, u32 tag)
 		{
+			for (u32 i = 0; i < _spu->mfc_size; i++)
+			{
+				if (_spu->mfc_queue[i].tag == (tag | 0x80))
+				{
+					// Unset stall bit
+					_spu->mfc_queue[i].tag &= 0x7f;
+				}
+			}
+
 			_spu->do_mfc(true);
 			_ret(*_spu, _spu->_ptr<u8>(0), nullptr);
 		};
@@ -2770,7 +2758,7 @@ void spu_recompiler::WRCH(spu_opcode_t op)
 		c->btr(SPU_OFF_32(ch_stall_mask), qw0->r32());
 		c->jnc(ret);
 		c->lea(*ls, x86::qword_ptr(ret));
-		c->jmp(imm_ptr<void(*)(spu_thread*, spu_function_t)>(sub));
+		c->jmp(imm_ptr<void(*)(spu_thread*, spu_function_t, u32)>(sub));
 		c->align(kAlignCode, 16);
 		c->bind(ret);
 		return;
